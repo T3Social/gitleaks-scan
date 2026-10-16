@@ -112,3 +112,21 @@ touches version control.
   rotate any real secret directly on the server, not from the email alone.
 - Treat this repo itself as sensitive if you ever commit a previous report
   file by accident — check `git log` before making the repo public.
+
+## CI workflow for GitHub repositories
+
+`.github/workflows/security.yml` is a reusable workflow that the CUZY repositories call on every push, pull request
+and weekly: Gitleaks (secrets, with `gitleaks-ci.toml`), `composer audit`, Trivy (file system) and Semgrep CE
+(warnings only). Caller, in `.github/workflows/security.yml` of a repository:
+
+```yaml
+name: Security
+on: { push: , pull_request: , schedule: [ { cron: "30 3 * * 1" } ], workflow_dispatch: }
+permissions: { contents: read }
+jobs:
+  security:
+    uses: cuzy-app/gitleaks-scan/.github/workflows/security.yml@v1
+```
+
+A repository adds its own rules in `.gitleaks.toml` (with `[extend] useDefault = true`) and confirmed false positives
+in `.gitleaksignore`. The workflow runs from the `v1` tag: move the tag after changing it.

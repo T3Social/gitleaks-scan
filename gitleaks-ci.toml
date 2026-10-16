@@ -1,0 +1,18 @@
+# Gitleaks configuration of the CI workflow (.github/workflows/security.yml): the default rules, minus generated
+# folders and the files that are encrypted or examples by design.
+[extend]
+useDefault = true
+
+[allowlist]
+paths = [
+  '''vendor/''',
+  '''node_modules/''',
+  '''protected/config/''',
+  '''protected/modules/rest/docs/''',
+  '''protected/runtime/''',
+  '''assets/''',
+  '''(^|/)tests/''',
+  '''\.example$''',
+  '''group_vars/all/vault\.yml''',   # Ansible vault, AES ciphertext (cuzy-infra)
+  '''composer\.lock''',
+]

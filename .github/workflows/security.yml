@@ -1,0 +1,116 @@
+# Security checks shared by the CUZY repositories, called on every push, every pull request and once a week:
+#
+#   jobs:
+#     security:
+#       uses: cuzy-app/gitleaks-scan/.github/workflows/security.yml@v1
+#
+# A failed run is the warning: GitHub emails the author of the push, and the monthly maintenance run lists the last
+# "Security" run of every repository. Only free tools, nothing that needs a licence key:
+#   - Gitleaks (CLI, MIT): secrets in the pushed commits, the whole history on the weekly run. Fails on any finding.
+#   - composer audit: published advisories on the locked PHP dependencies. Fails on any advisory.
+#   - Trivy (fs): vulnerable dependencies and misconfigurations (Dockerfiles, compose files). Fails on fixable CRITICAL.
+#   - Semgrep CE (p/php, p/secrets): insecure code patterns. Annotations and the job summary only, never fails.
+#
+# False positives: the shared allowlist is gitleaks-ci.toml (this repository); a repository adds its own rules in a
+# `.gitleaks.toml` at its root (which should `[extend] useDefault = true`), and confirmed old findings go into
+# `.gitleaksignore` (one fingerprint per line, with a comment). Trivy reads `.trivyignore.yaml` (reason and expiry for
+# each entry); Semgrep takes `# nosemgrep: <rule id>` on the line.
+
+name: Security
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  GITLEAKS_VERSION: 8.30.1
+
+jobs:
+  secrets:
+    name: Secrets (Gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/checkout@v5
+        with:
+          repository: cuzy-app/gitleaks-scan
+          ref: v1
+          path: .security-ci
+      - name: Install Gitleaks
+        run: |
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar -xz -C /usr/local/bin gitleaks
+      - name: Scan
+        env:
+          BEFORE: ${{ github.event.before }}
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          config=.security-ci/gitleaks-ci.toml
+          [ -f .gitleaks.toml ] && config=.gitleaks.toml
+          # The pushed commits only; the whole history on the weekly run, a manual run and a new branch
+          range=""
+          if [ "$EVENT" = push ] && [ -n "$BEFORE" ] && ! [[ "$BEFORE" =~ ^0+$ ]]; then range="$BEFORE..$GITHUB_SHA"; fi
+          if [ "$EVENT" = pull_request ]; then range="$BASE..$GITHUB_SHA"; fi
+          gitleaks git --config "$config" --redact --no-banner --exit-code 1 \
+            ${range:+--log-opts="$range"} --report-format sarif --report-path gitleaks.sarif .
+      - name: Keep the report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitleaks-report
+          path: gitleaks.sarif
+          retention-days: 14
+
+  dependencies:
+    name: Dependencies (composer audit, Trivy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: composer audit
+        run: |
+          if [ ! -f composer.lock ]; then echo "No composer.lock: nothing to audit."; exit 0; fi
+          composer audit --locked --no-interaction --abandoned=ignore
+      - name: Trivy (fixable critical vulnerabilities and misconfigurations fail)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,misconfig
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          skip-dirs: vendor,node_modules
+          trivyignores: ${{ hashFiles('.trivyignore.yaml') != '' && '.trivyignore.yaml' || '' }}
+      - name: Trivy (high, reported only)
+        if: always()
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,misconfig
+          severity: HIGH
+          ignore-unfixed: true
+          exit-code: "0"
+          skip-dirs: vendor,node_modules
+
+  code:
+    name: Code patterns (Semgrep, warnings only)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    container:
+      image: semgrep/semgrep:1.180.0
+    steps:
+      - uses: actions/checkout@v5
+      - name: Semgrep
+        run: |
+          semgrep scan --config p/php --config p/secrets --exclude vendor --exclude node_modules \
+            --metrics off --text --output semgrep.txt || true
+          { echo "### Semgrep findings"; echo '```'; cat semgrep.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          if [ -s semgrep.txt ] && grep -q "Code Finding" semgrep.txt; then
+            echo "::warning title=Semgrep::Insecure code patterns found, see the job summary"
+          fi
